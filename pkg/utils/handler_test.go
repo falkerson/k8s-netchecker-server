@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/julienschmidt/httprouter"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -34,12 +35,16 @@ import (
 )
 
 func newHandler() *Handler {
-	return &Handler{AgentCache: map[string]AgentInfo{}}
+	return &Handler{
+		AgentCache: map[string]AgentInfo{},
+		Metrics:    map[string]AgentMetrics{},
+	}
 }
 
 func agentExample() AgentInfo {
 	return AgentInfo{
 		ReportInterval: 5,
+		NodeName:       "test-node",
 		PodName:        "test",
 		HostDate:       time.Now(),
 	}
@@ -280,6 +285,7 @@ func CSwithPods() kubernetes.Interface {
 func createCnntyCheckTestServer(handler *Handler) *httptest.Server {
 	router := httprouter.New()
 	router.GET("/api/v1/connectivity_check", handler.CleanCache(handler.ConnectivityCheck))
+	router.Handler("GET", "/metrics", promhttp.Handler())
 	return httptest.NewServer(router)
 }
 
@@ -287,6 +293,15 @@ func cnntyRespOrFail(serverURL string, expectedStatus int, t *testing.T) *http.R
 	res, err := http.Get(serverURL + "/api/v1/connectivity_check")
 	if err != nil {
 		t.Errorf("Failed to GET successful connectivity check from server. Details: %v", err)
+	}
+	checkRespStatus(expectedStatus, res.StatusCode, t)
+	return res
+}
+
+func metricsRespOrFail(serverURL string, expectedStatus int, t *testing.T) *http.Response {
+	res, err := http.Get(serverURL + "/metrics")
+	if err != nil {
+		t.Errorf("Failed to GET metrics from server. Details: %v", err)
 	}
 	checkRespStatus(expectedStatus, res.StatusCode, t)
 	return res
@@ -328,6 +343,20 @@ func TestConnectivityCheckSuccess(t *testing.T) {
 			"Unexpected message from successful result payload. Actual: %v",
 			actual.Message)
 	}
+}
+
+func TestMetricsGetSuccess(t *testing.T) {
+	handler := newHandler()
+	handler.KubeClient = &KubeProxy{Client: CSwithPods()}
+
+	agent := agentExample()
+	agent.PodName = "agent-pod"
+	handler.AgentCache[agent.PodName] = agent
+
+	ts := createCnntyCheckTestServer(handler)
+	defer ts.Close()
+
+	metricsRespOrFail(ts.URL, http.StatusOK, t)
 }
 
 func TestConnectivityCheckFail(t *testing.T) {
